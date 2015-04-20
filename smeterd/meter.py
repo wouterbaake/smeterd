@@ -1,7 +1,8 @@
 import re
 import logging
 import serial
-
+import socket
+import telnetlib
 
 
 log = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ class SmartMeter(object):
                 stopbits=serial.STOPBITS_ONE
             )
         except (serial.SerialException,OSError) as e:
-            raise SmartMeterError(e)
+            raise
         else:
             self.serial.setRTS(False)
             self.port = self.serial.name
@@ -81,6 +82,81 @@ class SmartMeter(object):
 
         return P1Packet('\n'.join(lines))
 
+
+
+class SmartMeterIP(object):
+
+    def __init__(self,host,port, *args, **kwargs):
+        self.host=host
+        self.port=port
+        try:
+            self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.s.connect((self.host,self.port))
+        except (OSError) as e:
+            raise SmartMeterError(e)
+
+        log.info('TCP connection opened to %s:%s', self.host,self.port)
+
+
+    def connect(self):
+        try:
+            self.s.connect((self.host,self.port))
+        except (OSError) as e:
+            raise SmartMeterError(e)
+        log.info('TCP connection opened to %s:%s', self.host,self.port)
+
+    def disconnect(self):
+        log.info('Closing connection to %s:%s.', self.host,self.port)
+        self.s.close()
+    
+    def recv_end(self,delim='\n'):
+        total_data=[];data=''
+        while True:
+                data=self.s.recv(8192).decode()
+                if delim in data:
+                    total_data.append(data[:data.find(delim)])
+                    break
+                total_data.append(data)
+                if len(total_data)>1:
+                    #check if end_of_data was split
+                    last_pair=total_data[-2]+total_data[-1]
+                    if delim in last_pair:
+                        total_data[-2]=last_pair[:last_pair.find(delim)]
+                        total_data.pop()
+                        break
+        return ''.join(total_data)
+
+    def read_one_packet(self):
+        lines = []
+        lines_read = 0
+        complete_packet = False
+
+        log.info('Start reading lines')
+
+        while not complete_packet:
+            line = ''
+            try:
+                line = self.recv_end().strip()
+            except Exception as e:
+                log.error(e)
+                log.error('Read a total of %d lines', lines_read)
+                raise SmartMeterError(e)
+            else:
+                lines_read += 1
+                if line.startswith('/ISk5'):
+                    lines = [line]
+                else:
+                    lines.append(line)
+                if line == '!' and len(lines) > 10:
+                    complete_packet = True
+            finally:
+                log.debug('>> %s', line)
+
+        log.info('Done reading one packet (containing %d lines)' % len(lines))
+        log.debug('Total lines read from network port: %d', lines_read)
+        log.debug('Constructing P1Packet from raw data')
+
+        return P1Packet('\n'.join(lines))
 
 
 class SmartMeterError(Exception):
